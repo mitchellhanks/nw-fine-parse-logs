@@ -1,0 +1,1365 @@
+local parserName = "MAIL_lua"
+local parserVersion = "2016.01.07.1"
+
+local mailParser = nw.createParser(parserName, "RFC5322")
+
+nw.logDebug(parserName .. " " .. parserVersion)
+
+local parserDetails = [=[
+Extracts values from email messages values such as email addresses, 
+subject, and client.
+
+Parsing of "mail" (RFC2822) is independent of any transport for a
+message (SMTP, POP, IMAP, LMTP, etc.).  Think of the relationship
+as that between HTML and HTTP - this parses the equivalent of HTML,
+not HTTP.
+
+Meta "content" of an attachment is the literal value of the
+Content-Type: header, which is easily forged.  Do not consider
+content meta as any more authoritative than you would a filename
+extension.
+
+Regarding "Received" headers:  many MTAs put all sorts of badly
+formatted information into "Received" headers.  Most likely this
+will manifest as alias.host meta that isn't a hostname.
+]=]
+
+local dependencies = {
+    ["parsers"] = {
+        "FeedParser",
+        "nwll"
+    },
+    ["feeds"] = {
+        "alertids_info",
+        "alertids_suspicious"
+    }
+}
+
+local conflicts = {
+    ["parsers"] = {
+        "MAIL",
+        "MAIL-flex",
+        "email-ip"
+    }
+}
+
+local keyUsage = {
+    ["action"]     = "mail action performed: 'sendfrom, 'sendto', 'attach'",
+    ["alert.id"]   = "mapped to risk meta",
+    ["alias.host"] = "hostname values from x-originating-ip headers, received headers, and (optional) email addresses",
+    ["alias.ip"]   = "ipv4 values from x-originating-ip headers, received headers, and (optional) email addresses",
+    ["alias.ipv6"] = "ipv6 values from x-originating-ip headers, received headers, and (optional) email addresses",
+    ["attachment"] = "filenames of email attachments",
+    ["client"]     = "values from x-mailer: headers",
+    ["content"]    = "'mail', value of Content-Type headers within messages",
+    ["email"]      = "email address found within messages",
+    ["email.dst"]  = "(optional) message recipients",
+    ["email.src"]  = "(optional) message originators",
+    ["extension"]  = "extension from filenames of email attachments",
+    ["subject"]    = "values from subject: headers"
+}
+
+local alertIDs = {
+    ["info"] = {
+        ["nw35070"] = "email recipients cc/bcc only",
+        ["nw35075"] = "email missing recipients"
+    },
+    ["suspicious"] = {
+        ["nw05290"] = "email address domain is an IP",
+        ["nw05295"] = "received header hostname mismatch",
+        ["nw05300"] = "received header IP mismatch"
+    }
+}
+
+local liveTags = {
+    "featured",
+    "informational",
+}
+
+--[[
+    VERSION
+
+        2016.01.07.1  william motley  10.6.0.0.6817  accomodate missing client self id in received header
+        2015.09.11.1  william motley  10.6.0.0.5648  reformat comments
+        2015.06.24.1  william motley  10.5.0.0.4961  support RFC2047-encoded attachment filenames
+                                                             correct decoding of RFC2047 underscores
+        2014.12.19.1  william motley  10.4.1.0.3425  bugfix received headers
+        2014.08.01.1  william motley  10.4.0.0.3187  Rework how options are set
+        2014.03.24.1  william motley  10.3.2.2256    support RFC2047-encoded email addresses
+        2014.02.12.2  william motley  10.3.2.2256    rework stripping brackets and chevrons from addresses
+                                                             add "Register Address Hosts" options
+        2013.12.19.1  william motley  10.3.2.2256    scrub unprintable characters from subject meta
+        2013.12.16.1  william motley  10.3.2.2256    support RFC2047-encoded subject header
+        2013.11.08.1  william motley  10.3.0.1920    support RFC2231-formatted attachment headers
+        2013.10.28.1  william motley  10.3.0.1920    remove requirement of date and originator
+                                                             raise required number of headers 4 -> 5
+        2013.10.21.2  william motley  10.3.0.1920    strip "mailto:" from email addresses
+                                                             add auth results and cloudmark headers
+        2013.10.18.1  william motley  10.3.0.1920    add precedence, domainkey, and list headers
+        2013.08.27.1  william motley  10.3.0.1506    rework how headers are counted
+        2013.06.17.1  william motley  10.2.5.1ish    assigned alert.id's
+        2013.06.11.1  william motley  10.2.5.1ish    don't refer to "first" and "last" for an endOfStream callback
+        2013.05.02.2  william motley  10.2.5.2       payload:short -> payload:uint16
+                                                             payload:int -> payload:uint32
+                                                             payload:byte -> payload:uint8
+        2013.04.12.1  william motley  10.2.0.212     multipart mime detection
+                                                             email-ip detection
+                                                             parse RECEIVED headers
+        2012.11.28.2  william motley  9.8.1.50       Initial development
+
+
+    OPTIONS
+
+        "Register email.src and email.dst": default FALSE
+
+            Whether to register email address meta using the index keys
+            "email.src" and "email.dst".
+
+            If set to FALSE, all email address meta is registered with
+            the index key "email".
+
+            If set to TRUE:
+
+             - Originating email addresses will be registered with the index
+               key "email.src"
+
+             - Recipient email addresses will be registered with the index
+               key "email.dst"
+
+        "Parse Quoted Messages" : default FALSE
+
+            Whether to register meta from mail headers which are part of a
+            quoted message.
+
+        "Register Address Hosts" : default FALSE
+
+            Whether to register the host portion of email addresses as meta.
+
+            The key used to register will be alias.host, alias.ip, or
+            alias.ipv6 as appropriate.
+
+        "Parse Received headers" : default TRUE
+
+            Whether to register meta from Received: headers.
+
+            Many MTAs put all sorts of badly formatted information into
+            "Received:" headers.  Most likely this will manifest as alias.host
+            meta that isn't a hostname.
+
+            If this is problematic in your environment, disable parsing of
+            Received: headers.
+
+
+    IMPLEMENTATION
+
+        A block of headers must contain a total of at least 5 mail-like headers.
+        If that requirement is not fulfilled, then no meta is registered for
+        that block.
+
+        Meta "group" ostensibly is registered by the native parser.  However,
+        I've never seen it registered, and I have no idea what it would be.
+        Therefore, meta "group" is not registered by this parser.
+
+        The native parser sometimes registers content "message/rfc822",
+        sometimes content "mail", sometimes both.  I can't determine why one
+        or the other.  This parser simply registers content meta "mail".
+
+        In order to not register meta from headers in messages that are
+        attached to a message, the parser keeps track of mime boundaries.
+        When an "outer" boundary is seen, only attachment headers are
+        extracted until the boundary terminatioin is seen.  When an "inner"
+        boundary is seen, no headers are extracted until the boundary
+        termination is seen.
+
+        A note on RFC2047 encoding:
+
+            RFC2047 allows multiple charsets within the same string.
+
+                E.g. part ISO-2022-JP and part is windows-1256
+
+            Furthermore, multiple encodings are also allowed.
+
+                E.g. part is quoted-printable, part is base64
+
+            There is no way to register multiple character sets for
+            the same meta value.  The only possible solution would be
+            to register multiple meta values (one for each charset).
+
+            However, this parser currently DOES NOT do that.  Only
+            ONE meta value is registered, even if there may be multiple
+            character sets and/or encodings.
+
+
+    TODO
+
+        Header count threshold option?
+
+        Extract/register meta "group" (see NOTES above).
+
+        Localize global functions and variables (performance enhancement).
+
+        Register multiple meta values for multiple RFC2047 character sets?
+
+--]]
+
+local nwll = require("nwll")
+--local debugParser = require('debugParser')
+
+-- define options
+    local options = ({
+        ["registerEmailSrcDst"] = ({
+            ["name"] = "Register email.src and email.dst",
+            ["description"] = "Register email meta using index keys email.src and email.dst",
+            ["type"] = "boolean",
+            ["default"] = false,
+        }),
+        ["ignoreMimeBoundaries"] = ({
+            ["name"] = "Parse Quoted Messages",
+            ["description"] = "Register meta from headers within quoted messages.",
+            ["type"] = "boolean",
+            ["default"] = false,
+        }),
+        ["registerAddressHosts"] = ({
+            ["name"] = "Register Address Hosts",
+            ["description"] = "Register host portion of email addresses.",
+            ["type"] = "boolean",
+            ["default"] = false,
+        }),
+        ["parseReceived"] = ({
+            ["name"] = "Parse Received headers",
+            ["description"] = "Register meta from Received: headers",
+            ["type"] = "boolean",
+            ["default"] = true
+        })
+    })
+-- set options DON'T MODIFY THIS SECTION
+    pcall(function()
+        local optionsModule = parserName .. "_options"
+        optionsModule = require(optionsModule)
+        for name,parameters in pairs(options) do
+            if optionsModule[name] then
+                parameters.value = optionsModule[name]()
+            end
+        end
+    end)
+    for name,parameters in pairs(options) do
+        if parameters.type == "number" then
+            parameters.value = tonumber(parameters.value)
+        end
+        if type(parameters.value) ~= parameters.type then
+            parameters.value = parameters.default
+        elseif parameters.type == "number" then
+            parameters.value =
+                (parameters.minimum and parameters.value < parameters.minimum and parameters.minimum) or
+                (parameters.maximum and parameters.value > parameters.maximum and parameters.maximum) or
+                parameters.value
+        end
+    end
+-- end options
+
+local indexKeys = {}
+table.insert(indexKeys, nwlanguagekey.create("action"))
+table.insert(indexKeys, nwlanguagekey.create("content"))
+table.insert(indexKeys, nwlanguagekey.create("email"))
+table.insert(indexKeys, nwlanguagekey.create("alias.host"))
+table.insert(indexKeys, nwlanguagekey.create("alias.ip", nwtypes.IPv4))
+table.insert(indexKeys, nwlanguagekey.create("alias.ipv6",nwtypes.IPv6))
+table.insert(indexKeys, nwlanguagekey.create("alert.id"))
+table.insert(indexKeys, nwlanguagekey.create("subject"))
+table.insert(indexKeys, nwlanguagekey.create("client"))
+table.insert(indexKeys, nwlanguagekey.create("attachment"))
+table.insert(indexKeys, nwlanguagekey.create("extension"))
+if options.registerEmailSrcDst.value then
+    table.insert(indexKeys, nwlanguagekey.create("email.src"))
+    table.insert(indexKeys, nwlanguagekey.create("email.dst"))
+end
+
+mailParser:setKeys(indexKeys)
+
+function mailParser:reset()
+    self.mailHeaders = nil
+    self.thisIsMail = nil
+    self.mime = {
+        ["outer"] = false,
+        ["outerMatched"] = false,
+        ["inner"] = false,
+        ["innerMatched"] = false
+    }
+end
+
+function mailParser:pruneHeader(payload)
+    local beginHeader, pos, endOfHeader = 1, 1, -1
+    -- Remove leading whitespace
+    repeat
+        local loopControl = 0
+        local charByte = payload:uint8(pos)
+        if charByte == 9 or charByte == 10 or charByte == 13 or charByte == 32 then
+            pos = pos + 1
+            loopControl = 1
+        end
+    until loopControl == 0
+    beginHeader = pos
+    -- Find the end of a header:
+    --
+    --    A header can span multiple lines.
+    --
+    --    A newline followed by a tab or a space is a
+    --    continuation of the current header.
+    --
+    --    Some broken mailers doen't use anything to mark
+    --    a continuation - nothing we can do for that...
+    repeat
+        local loopControl = 0
+        local eol = payload:find("\010", pos)
+        if eol then
+            endOfHeader = eol
+            local nextChar = payload:uint8(eol + 1)
+            if nextChar == 9 or nextChar == 32 then
+                pos = eol + 2
+                loopControl = 1
+            end
+        end
+    until loopControl == 0
+    if endOfHeader then
+        payload = payload:sub(beginHeader, endOfHeader)
+    end
+    return payload
+end
+
+function mailParser:rfc2047(encodedString)
+    if not encodedString then
+        return
+    end
+    local decodedString, charset = encodedString, nil
+    -- look for encoding, e.g.:
+    --     =?windows-1256?B?VklQIFRv...=?
+    if string.byte(encodedString, 1) == 61 and string.byte(encodedString, 2) == 63 then
+        local charsetEnd = string.find(encodedString, "?", 3)
+        if charsetEnd then
+            if string.byte(encodedString, charsetEnd + 2) == 63 then
+                local encodingChar = string.byte(encodedString, charsetEnd + 1)
+                if encodingChar == 66 or encodingChar == 81 or encodingChar == 98 or encodingChar == 113 then
+                    local stringBegin = charsetEnd + 3
+                    local stringEnd = string.find(encodedString, "?=", stringBegin + 1)
+                    if stringEnd then
+                        stringEnd = stringEnd - 1
+                        decodedString = string.sub(encodedString, stringBegin, stringEnd)
+                        decodedString = string.gsub(decodedString, "_", "\032")
+                        if encodingChar == 66 or encodingChar == 98 then
+                            decodedString = nw.base64Decode(decodedString)
+                        else
+                            decodedString = nwll.decodeQuotedPrintable(decodedString)
+                        end
+                        charset = string.sub(encodedString, 3, charsetEnd - 1)
+                    end
+                end
+            end
+        end
+    end
+    return decodedString, charset
+end
+
+function mailParser:registerAddresses(header, type)
+    local delimiter = string.find(header, "[ ,;\010\009<>:\034\039]")
+    if delimiter then
+        self:registerAddresses(string.sub(header, 1, delimiter - 1), type)
+        self:registerAddresses(string.sub(header, delimiter + 1, -1), type)
+    else
+        if string.find(header, "@") or string.find(header, "?=") then
+            local charset
+            header, charset = self:rfc2047(header)
+            if options.registerEmailSrcDst.value and type then
+                if type == 1 then
+                    nw.createMeta(self.keys["email.src"], header, charset)
+                elseif type == 2 then
+                    nw.createMeta(self.keys["email.dst"], header, charset)
+                end
+            else
+                nw.createMeta(self.keys.email, header, charset)
+            end
+            local ampPos = string.find(header, "@")
+            if ampPos then
+                local emailDomain = string.sub(header, ampPos + 1, -1)
+                local host, key = nwll.determineHostType(emailDomain)
+                if host and key then
+                    if key ~= "alias.host" then
+                        nw.createMeta(self.keys["alert.id"], "nw05290")
+                    end
+                    if options.registerAddressHosts.value then
+                        nw.createMeta(self.keys[key], host)
+                    end
+                end
+            end
+        end
+    end
+end
+
+function mailParser:recordPosition(headerType, first, last)
+    -- localize / initialize the table to hold header positions
+    local mailHeaders = self.mailHeaders or {}
+    -- give the previous header seen an ending position
+    if mailHeaders["lastheader"] then
+        mailHeaders[mailHeaders["lastheader"]][#mailHeaders[mailHeaders["lastheader"]]]["last"] = first - 1
+    end
+    -- set this header as the "previous header"
+    mailHeaders["lastheader"] = headerType
+    -- if there isn't an table for this headerType yet, initialize it
+    mailHeaders[headerType] = mailHeaders[headerType] or {}
+    -- record this header's starting position
+    local lengthHeaderType = #mailHeaders[headerType] + 1
+    mailHeaders[headerType][lengthHeaderType] = {}
+    mailHeaders[headerType][lengthHeaderType]["first"] = last + 1
+    -- copy local table back to global
+    self.mailHeaders = mailHeaders
+end
+
+function mailParser:originator(token,first,last)
+    local status, error = pcall(function(first, last)
+        if not self.mime.outerMatched then
+            mailParser:recordPosition("originator", first, last)
+        end
+    end, first, last)
+    if error and debugParser then
+        nw.logFailure(error)
+    end
+end
+
+function mailParser:recipientTo(token,first,last)
+    local status, error = pcall(function(first, last)
+        if not self.mime.outerMatched then
+            mailParser:recordPosition("recipientTo", first, last)
+        end
+    end, first, last)
+    if error and debugParser then
+        nw.logFailure(error)
+    end
+end
+
+function mailParser:recipientCC(token,first,last)
+    local status, error = pcall(function(first, last)
+        if not self.mime.outerMatched then
+            mailParser:recordPosition("recipientCC", first, last)
+        end
+    end, first, last)
+    if error and debugParser then
+        nw.logFailure(error)
+    end
+end
+
+function mailParser:subject(token,first,last)
+    local status, error = pcall(function(first, last)
+        if not self.mime.outerMatched then
+            mailParser:recordPosition("subject", first, last)
+        end
+    end, first, last)
+    if error and debugParser then
+        nw.logFailure(error)
+    end
+end
+
+function mailParser:origIP(token,first,last)
+    local status, error = pcall(function(first, last)
+        if not self.mime.outerMatched then
+            mailParser:recordPosition("origIP", first, last)
+        end
+    end, first, last)
+    if error and debugParser then
+        nw.logFailure(error)
+    end
+end
+
+function mailParser:date(token,first,last)
+    local status, error = pcall(function(first, last)
+        if not self.mime.outerMatched then
+            mailParser:recordPosition("date", first, last)
+        end
+    end, first, last)
+    if error and debugParser then
+        nw.logFailure(error)
+    end
+end
+
+function mailParser:mailer(token, first, last)
+    local status, error = pcall(function(first, last)
+        if not self.mime.outerMatched then
+            mailParser:recordPosition("mailer", first, last)
+        end
+    end, first, last)
+    if error and debugParser then
+        nw.logFailure(error)
+    end
+end
+
+function mailParser:received(token, first, last)
+    local status, error = pcall(function(first, last)
+        if not self.mime.outerMatched then
+            mailParser:recordPosition("received", first, last)
+        end
+    end, first, last)
+    if error and debugParser then
+        nw.logFailure(error)
+    end
+end
+
+function mailParser:otherHeader(token, first, last)
+    local status, error = pcall(function(first, last)
+        if not self.mime.outerMatched then
+            mailParser:recordPosition("other", first, last)
+        end
+    end, first, last)
+    if error and debugParser then
+        nw.logFailure(error)
+    end
+end
+
+function mailParser:boundary(token, first, last)
+    local status, error = pcall(function(first, last)
+        if not options.ignoreMimeBoundaries.value then
+            if not self.mime.outer or (self.mime.outerMatched and not self.mime.inner) then
+                mailParser:recordPosition("boundary", first, last)
+            end
+        end
+    end, first, last)
+    if error and debugParser then
+        nw.logFailure(error)
+    end
+end
+
+function mailParser:contentType(token, first, last)
+    local status, error = pcall(function(first, last)
+        if not self.mime.innerMatched then
+            mailParser:recordPosition("attachment-type", first, last)
+        end
+    end, first, last)
+    if error and debugParser then
+        nw.logFailure(error)
+    end
+end
+
+function mailParser:contentDisposition(token, first, last)
+    local status, error = pcall(function(first, last)
+        if not self.mime.innerMatched then
+            mailParser:recordPosition("attachment-disp", first, last)
+        end
+    end, first, last)
+    if error and debugParser then
+        nw.logFailure(error)
+    end
+end
+
+function mailParser:filename(token, first, last)
+    local status, error = pcall(function(token, first, last)
+        if not self.mime.innerMatched then
+            -- This is a little different: we want to know where it is, but it doesn't count as the end of another header.
+            local mailHeaders = self.mailHeaders or {}
+            mailHeaders["filename"] = mailHeaders["filename"] or {}
+            mailHeaders["filename"][#mailHeaders["filename"] + 1] = last + 1
+            self.mailHeaders = mailHeaders
+        end
+    end, token, first, last)
+    if error and debugParser then
+        nw.logFailure(error)
+    end
+end
+
+function mailParser:encFilename(token, first, last)
+    local status, error = pcall(function(token, first, last)
+        if not self.mime.innerMatched then
+            -- Like filename, we want to know where it is, but it doesn't count as the end of another header.
+            local mailHeaders = self.mailHeaders or {}
+            mailHeaders["encFilename"] = mailHeaders["encFilename"] or {}
+            mailHeaders["encFilename"][#mailHeaders["encFilename"] + 1] = last + 1
+            self.mailHeaders = mailHeaders
+        end
+    end, token, first, last)
+    if error and debugParser then
+        nw.logFailure(error)
+    end
+end
+
+function mailParser:registerHeaders(mailHeaders)
+    -- Check if we saw a TO:, if not then check if we saw a CC: or BCC:
+    if not mailHeaders["recipientTo"] then
+        -- no TO: header
+        if mailHeaders["recipientCC"] then
+            nw.createMeta(self.keys["alert.id"],"nw35070")
+        else
+            nw.createMeta(self.keys["alert.id"],"nw35075")
+        end
+    end
+    -- originator addresses
+    local actions = { ["sendfrom"] = false, ["sendto"] = false }
+    if mailHeaders["originator"] then
+        for idx,originator in ipairs(mailHeaders["originator"]) do
+            if originator["first"] and originator["last"] then
+                if not actions["sendfrom"] then
+                    nw.createMeta(self.keys.action,"sendfrom")
+                    actions["sendfrom"] = true
+                end
+                local payload = nw.getPayload(originator["first"], originator["last"])
+                payload = self:pruneHeader(payload)
+                self:registerAddresses(payload:tostring(1, -1), 1)
+            end
+        end
+    end
+    -- mail client
+    if mailHeaders["mailer"] then
+        for idx, mailer in ipairs(mailHeaders["mailer"]) do
+            if mailer["first"] and mailer["last"] then
+                if not actions["sendfrom"] then
+                    nw.createMeta(self.keys.action, "sendfrom")
+                    actions["sendfrom"] = true
+                end
+                local payload = nw.getPayload(mailer["first"], mailer["last"])
+                local pos = 1
+                -- skip leading spaces
+                repeat
+                    local loopControl = 0
+                    if payload:uint8(pos) == 32 then
+                        pos = pos + 1
+                        loopControl = 1
+                    end
+                until loopControl == 0
+                -- let meta scrub truncate at end of line
+                nw.createMeta(self.keys.client, payload:sub(pos, -1))
+            end
+        end
+    end
+    -- originating IP
+    if mailHeaders["origIP"] then
+        for idx, origIP in ipairs(mailHeaders["origIP"]) do
+            if origIP["first"] and origIP["last"] then
+                if not actions["sendfrom"] then
+                    nw.createMeta(self.keys.action, "sendfrom")
+                    actions["sendfrom"] = ture
+                end
+                local payload = nw.getPayload(origIP["first"], origIP["last"])
+                local pos = 1
+                -- skip leading spaces
+                repeat
+                    local loopControl = 0
+                    if payload:uint8(pos) == 32 then
+                        pos = pos + 1
+                        loopControl = 1
+                    end
+                until loopControl == 0
+                --look for end of line
+                local endOfLine = payload:find("\010", pos + 1, -1)
+                if endOfLine then
+                    if payload:uint8(endOfLine - 1) == 13 then
+                        endOfLine = endOfLine - 2
+                    else
+                        endOfLine = endOfLine - 1
+                    end
+                    local host, key = nwll.determineHostType(payload:tostring(pos, endOfLine))
+                    if host and key then
+                        nw.createMeta(self.keys[key], host)
+                    end
+                end
+            end
+        end
+    end
+    -- recipient addresses
+    if mailHeaders["recipientTo"] then
+        for idx,recipient in ipairs(mailHeaders["recipientTo"]) do
+            if recipient["first"] and recipient["last"] then
+                if not actions["sendto"] then
+                    nw.createMeta(self.keys.action,"sendto")
+                    actions["sendto"] = true
+                end
+                local payload = nw.getPayload(recipient["first"], recipient["last"])
+                payload = self:pruneHeader(payload)
+                self:registerAddresses(payload:tostring(1, -1), 2)
+            end
+        end
+    end
+    if mailHeaders["recipientCC"] then
+        for idx,recipient in ipairs(mailHeaders["recipientCC"]) do
+            if recipient["first"] and recipient["last"] then
+                if not actions["sendto"] then
+                    nw.createMeta(self.keys.action,"sendto")
+                    actions["sendto"] = true
+                end
+                local payload = nw.getPayload(recipient["first"], recipient["last"])
+                payload = self:pruneHeader(payload)
+                self:registerAddresses(payload:tostring(1, -1), 2)
+            end
+        end
+    end
+    -- subject
+    if mailHeaders["subject"] then
+        for idx, subject in ipairs(mailHeaders["subject"]) do
+            if subject["first"] and subject["last"] then
+                local payload = nw.getPayload(subject["first"], subject["last"])
+                payload = self:pruneHeader(payload)
+                local subject = payload:tostring(1, -1)
+                subject = string.gsub(subject, "[\010\013\009]", "")
+                if subject then
+                    local charset
+                    subject, charset = self:rfc2047(subject)
+                    nw.createMeta(self.keys.subject, subject, charset)
+                end
+            end
+        end
+    end
+    -- received
+    if mailHeaders["received"] and options.parseReceived.value then
+        for idx, path in pairs(mailHeaders["received"]) do
+            if path["first"] and path["last"] then
+                local payload = nw.getPayload(path["first"], path["last"])
+                local position = 1
+                repeat
+                    local loopControl = 0
+                    if payload:uint8(position) == 32 then
+                        position = position + 1
+                        loopControl = 1
+                    end
+                until loopControl == 0
+                local client = {
+                    ["selfID"] = false,
+                    ["selfIDType"] = false,
+                    ["ip"] = false,
+                    ["ipType"] = false,
+                    ["ptr"] = false,
+                    ["ptrType"] = false
+                }
+                -- only interested up to "by"
+                local endOfClient = payload:find("by", position, -1)
+                if endOfClient then
+                    endOfClient = endOfClient - 1
+                    -- first thing should be "from "
+                    local numTemp = payload:uint32(position)
+                    if numTemp == 1179799373 or numTemp == 1181904749 or numTemp == 1718775661 then
+                        if payload:uint8(position + 4) == 32 then
+                            position = position + 5
+                            -- everything up to an open paren is client self.id
+                            local openParen = payload:find("(", position, endOfClient)
+                            if openParen then
+                                if openParen then
+                                    if openParen ~= position and payload:byte(openParen - 1) == 32 then
+                                        -- client self.id exists
+                                        client.selfID = payload:tostring(position, openParen - 2)
+                                    end
+                                    position = openParen + 1
+                                    local endParen = payload:find(")", position, endOfClient)
+                                    if endParen then
+                                        endParen = endParen - 1
+                                        space = payload:find(" ", position, endParen)
+                                        if space then
+                                            client.ptr = payload:tostring(position, space - 1)
+                                            client.ip = payload:tostring(space + 1, endParen)
+                                        else
+                                            client.ip = payload:tostring(position, endParen)
+                                        end
+                                    end
+                                end
+                            end
+                        end
+                    end
+                end
+                if client.selfID then
+                    client.selfID, client.selfIDType = nwll.determineHostType(client.selfID)
+                    if client.selfID and client.selfIDType then
+                        nw.createMeta(self.keys[client.selfIDType],client.selfID)
+                    end
+                end
+                if client.ptr then
+                    client.ptr, client.ptrType = nwll.determineHostType(client.ptr)
+                    if client.ptr and client.ptrType then
+                        nw.createMeta(self.keys[client.ptrType],client.ptr)
+                    end
+                end
+                if client.ip then
+                    client.ip, client.ipType = nwll.determineHostType(client.ip)
+                    if client.ip and client.ipType then
+                        nw.createMeta(self.keys[client.ipType],client.ip)
+                    end
+                end
+                if client.selfID then
+                    if client.selfIDType == "alias.host" then
+                        if client.ptr and client.selfID ~= client.ptr then
+                            nw.createMeta(self.keys["alert.id"], "nw05295")
+                        end
+                    elseif client.ip and client.selfID ~= client.ip then
+                        nw.createMeta(self.keys["alert.id"], "nw05300")
+                    end
+                end
+            end
+        end
+    end
+end
+
+function mailParser:registerAttach(mailHeaders)
+    -- Attachments
+    if mailHeaders["filename"] then
+        for indx, filenamePosition in ipairs(mailHeaders["filename"]) do
+            local headerFound = nil
+            if mailHeaders["attachment-type"] then
+                for idx, attachment in ipairs(mailHeaders["attachment-type"]) do
+                    if attachment["first"] and attachment["last"] and filenamePosition >= attachment["first"] and filenamePosition <= attachment["last"] then
+                        headerFound = true
+                        local payload = nw.getPayload(attachment["first"], filenamePosition - 1)
+                        local pos, endOfName = 1, nil
+                        local thisByte = payload:uint8(pos)
+                        if thisByte == 32 then
+                            pos = 2
+                        end
+                        endOfName = payload:find(";", pos, -1)
+                        if not endOfName then
+                            endOfName = -1
+                        else
+                            endOfName = endOfName - 1
+                        end
+                        nw.createMeta(self.keys.content, payload:sub(pos, endOfName))
+                        payload = nw.getPayload(filenamePosition, attachment["last"])
+                        pos, endOfName = 1, nil
+                        thisByte = payload:uint8(pos)
+                        if thisByte == 32 then
+                            pos = 2
+                            thisByte = payload:uint8(pos)
+                        end
+                        if thisByte == 34 then
+                            pos = pos + 1
+                            endOfName = payload:find("\"", pos, -1)
+                        elseif thisByte == 39 then
+                            pos = pos + 1
+                            endOfName = payload:find("\'", pos, -1)
+                        else
+                            endOfName = payload:find("\n", pos, -1)
+                        end
+                        if endOfName then
+                            endOfName = endOfName - 1
+                            nw.createMeta(self.keys.action, "attach")
+                            local file, charset
+                            file = payload:tostring(pos, endOfName)
+                            file, charset = self:rfc2047(file)
+                            if file then
+                                local dir, ext
+                                dir, file, ext = nwll.extractPathElements(file)
+                                if file then
+                                    nw.createMeta(self.keys.attachment, file, charset)
+                                end
+                                if ext then
+                                    nw.createMeta(self.keys.extension, ext, charset)
+                                end
+                            end
+                        end
+                        break
+                    end
+                end
+            end
+            if not headerFound and mailHeaders["attachment-disp"] then
+                for idx, attachment in ipairs(mailHeaders["attachment-disp"]) do
+                    if attachment["first"] and attachment["last"] and filenamePosition >= attachment["first"] and filenamePosition <= attachment["last"] then
+                        payload = nw.getPayload(filenamePosition, attachment["last"])
+                        pos, endOfName = 1, nil
+                        thisByte = payload:uint8(pos)
+                        if thisByte == 32 then
+                            pos = 2
+                            thisByte = payload:uint8(pos)
+                        end
+                        if thisByte == 34 then
+                            pos = pos + 1
+                            endOfName = payload:find("\"", pos, -1)
+                        elseif thisByte == 39 then
+                            pos = pos + 1
+                            endOfName = payload:find("\'", pos, -1)
+                        else
+                            endOfName = payload:find("\n", pos, -1)
+                        end
+                        if endOfName then
+                            endOfName = endOfName - 1
+                            nw.createMeta(self.keys.action, "attach")
+                            local file, charset
+                            file = payload:tostring(pos, endOfName)
+                            file, charset = self:rfc2047(file)
+                            if file then
+                                local dir, ext
+                                dir, file, ext = nwll.extractPathElements(file)
+                                if file then
+                                    nw.createMeta(self.keys.attachment, file, charset)
+                                end
+                                if ext then
+                                    nw.createMeta(self.keys.extension, ext, charset)
+                                end
+                            end
+                        end
+                        break
+                    end
+                end
+            end
+        end
+    elseif mailHeaders["encFilename"] and mailHeaders["encFilename"][1] then
+        local numNames = #mailHeaders["encFilename"]
+        local headerFound = nil
+        if mailHeaders["attachment-type"] then
+            for idx, attachment in ipairs(mailHeaders["attachment-type"]) do
+                if attachment["first"] and attachment["last"] then
+                    local encSegments = {}
+                    for idx2, encFilePos in ipairs(mailHeaders["encFilename"]) do
+                        if attachment["first"] < encFilePos and encFilePos < attachment["last"] then
+                            table.insert(encSegments, encFilePos)
+                        end
+                    end
+                    if #encSegments > 0 then
+                        local payload = nw.getPayload(attachment["first"], encSegments[1] - 1)
+                        local pos, endOfName = 1, nil
+                        local thisByte = payload:uint8(pos)
+                        if thisByte == 32 then
+                            pos = 2
+                        end
+                        endOfName = payload:find(";", pos, -1)
+                        if not endOfName then
+                            endOfName = -1
+                        else
+                            endOfName = endOfName - 1
+                        end
+                        nw.createMeta(self.keys.content, payload:sub(pos, endOfName))
+                        local encFilename = {}
+                        local numSegments = #encSegments
+                        for segNum, segPos in ipairs(encSegments) do
+                            if segNum < numSegments then
+                                payload = nw.getPayload(segPos, encSegments[segNum + 1] - 1)
+                            else
+                                payload = nw.getPayload(segPos, attachment["last"])
+                            end
+                            if payload then
+                                local lineEnd = payload:find("\010", 1, -1)
+                                if lineEnd then
+                                    lineEnd = lineEnd - 1
+                                    if payload:uint8(lineEnd) == 13 then
+                                        lineEnd = lineEnd - 1
+                                    end
+                                    if payload:uint8(lineEnd) == 59 then
+                                        lineEnd = lineEnd - 1
+                                    end
+                                    local tmpStr = payload:tostring(1, lineEnd)
+                                    if tmpStr then
+                                        local posEqual = string.find(tmpStr, "=")
+                                        if posEqual then
+                                            local count
+                                            if posEqual == 1 then
+                                                count = 1
+                                            else
+                                                local posAsterisk = string.find(tmpStr, "*" )
+                                                if posAsterisk and posAsterisk < posEqual then
+                                                    count = string.sub(tmpStr, 1, posAsterisk - 1)
+                                                    count = tonumber(count)
+                                                    count = count and count + 1
+                                                end
+                                            end
+                                            if count then
+                                                if count == 1 then
+                                                    local posQuote1 = string.find(tmpStr, "'", posEqual + 1)
+                                                    local posQuote2
+                                                    if not posQuote1 then
+                                                        encFilename[1] = string.sub(tmpStr, posEqual + 1, -1)
+                                                    else
+                                                        posQuote2 = string.find(tmpStr, "'", posQuote1 + 1)
+                                                        if posQuote2 then
+                                                            encFilename["charset"] = string.sub(tmpStr, posEqual + 1, posQuote1 - 1)
+                                                            encFilename[1] = string.sub(tmpStr, posQuote2 + 1, -1)
+                                                        end
+                                                    end
+                                                else
+                                                    encFilename[count] = string.sub(tmpStr, posEqual + 1, -1)
+                                                end
+                                            end
+                                        end
+                                    end
+                                end
+                            end
+                        end
+                        if encFilename and #encFilename > 0 then
+                            local attachment = table.concat(encFilename)
+                            attachment = nwll.urldecode(attachment)
+                            nw.createMeta(self.keys["action"], "attach")
+                            nw.createMeta(self.keys["attachment"], attachment, encFilename["charset"])
+                            local dir, file, ext = nwll.extractPathElements(attachment)
+                            if ext then
+                                nw.createMeta(self.keys["extension"], ext, encFilename["charset"])
+                            end
+                        end
+                    end
+                end
+            end
+        end
+        if mailHeaders["attachment-disp"] then
+            for idx, attachment in ipairs(mailHeaders["attachment-disp"]) do
+                if attachment["first"] and attachment["last"] then
+                    local encSegments = {}
+                    for idx2, encFilePos in ipairs(mailHeaders["encFilename"]) do
+                        if attachment["first"] < encFilePos and encFilePos < attachment["last"] then
+                            table.insert(encSegments, encFilePos)
+                        end
+                    end
+                    if #encSegments > 0 then
+                        local encFilename = {}
+                        local numSegments = #encSegments
+                        for segNum, segPos in ipairs(encSegments) do
+                            if segNum < numSegments then
+                                payload = nw.getPayload(segPos, encSegments[segNum + 1] - 1)
+                            else
+                                payload = nw.getPayload(segPos, attachment["last"])
+                            end
+                            if payload then
+                                local lineEnd = payload:find("\010", 1, -1)
+                                if lineEnd then
+                                    lineEnd = lineEnd - 1
+                                    if payload:uint8(lineEnd) == 13 then
+                                        lineEnd = lineEnd - 1
+                                    end
+                                    if payload:uint8(lineEnd) == 59 then
+                                        lineEnd = lineEnd - 1
+                                    end
+                                    local tmpStr = payload:tostring(1, lineEnd)
+                                    if tmpStr then
+                                        local posEqual = string.find(tmpStr, "=")
+                                        if posEqual then
+                                            local count
+                                            if posEqual == 1 then
+                                                count = 1
+                                            else
+                                                local posAsterisk = string.find(tmpStr, "*" )
+                                                if posAsterisk and posAsterisk < posEqual then
+                                                    count = string.sub(tmpStr, 1, posAsterisk - 1)
+                                                    count = tonumber(count)
+                                                    count = count and count + 1
+                                                end
+                                            end
+                                            if count then
+                                                if count == 1 then
+                                                    local posQuote1 = string.find(tmpStr, "'", posEqual + 1)
+                                                    local posQuote2
+                                                    if not posQuote1 then
+                                                        encFilename[1] = string.sub(tmpStr, posEqual + 1, -1)
+                                                    else
+                                                        posQuote2 = string.find(tmpStr, "'", posQuote1 + 1)
+                                                        if posQuote2 then
+                                                            encFilename["charset"] = string.sub(tmpStr, posEqual + 1, posQuote1 - 1)
+                                                            encFilename[1] = string.sub(tmpStr, posQuote2 + 1, -1)
+                                                        end
+                                                    end
+                                                else
+                                                    encFilename[count] = string.sub(tmpStr, posEqual + 1, -1)
+                                                end
+                                            end
+                                        end
+                                    end
+                                end
+                            end
+                        end
+                        if encFilename and #encFilename > 0 then
+                            local attachment = table.concat(encFilename)
+                            attachment = nwll.urldecode(attachment)
+                            nw.createMeta(self.keys["action"], "attach")
+                            nw.createMeta(self.keys["attachment"], attachment, encFilename["charset"])
+                            local dir, file, ext = nwll.extractPathElements(attachment)
+                            if ext then
+                                nw.createMeta(self.keys["extension"], ext, encFilename["charset"])
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    else
+        -- If we saw filenames then content-type was registered at the same time.  But if we didn't see filenames,
+        -- we still need to register content-types if we have them.
+        if mailHeaders["attachment-type"] then
+            for idx, header in ipairs(mailHeaders["attachment-type"]) do
+                if header["first"] and header["last"] then
+                    local payload = nw.getPayload(header["first"], header["last"])
+                    local pos, endOfLine = 1, nil
+                    local thisByte = payload:uint8(pos)
+                    if thisByte == 32 then
+                        pos = 2
+                    end
+                    endOfLine = payload:find(";", pos, -1)
+                    if not endOfLine then
+                        endOfLine = -1
+                    else
+                        endOfLine = endOfLine - 1
+                    end
+                    nw.createMeta(self.keys.content, payload:sub(pos, endOfLine))
+                end
+            end
+        end
+    end
+end
+
+function mailParser:endOfHeaders(token, first, last)
+    local status, error = pcall(function(first, last)
+        -- Record ending position of previous header
+        if self.mailHeaders and self.mailHeaders["lastheader"] and not self.mailHeaders[self.mailHeaders["lastheader"]][#self.mailHeaders[self.mailHeaders["lastheader"]]]["last"] then
+            if first then
+                self.mailHeaders[self.mailHeaders["lastheader"]][#self.mailHeaders[self.mailHeaders["lastheader"]]]["last"] = first + 1
+            else
+                self.mailHeaders[self.mailHeaders["lastheader"]][#self.mailHeaders[self.mailHeaders["lastheader"]]]["last"] = -1
+            end
+        end
+        local mailHeaders = self.mailHeaders
+        local thisIsMail
+        --  Must have seen at least 5 mail-type headers.
+        --
+        --  Two "thisIsMail" variables are used.  A local "thisIsMail" and a global "self.thisIsMail".
+        --  The local is used to determine whether to register ~this~ block of headers.  A positive result
+        --  is also saved in the global and used to determine whether to register attachments (blocks of
+        --  attachment headers appear by themselves and won't satisfy the above requirements).
+        if mailHeaders then
+            -- How many types of headers did we see?
+            local headerCount = 0
+            for headerType in pairs(mailHeaders) do
+                headerCount = headerCount + 1
+            end
+            -- (attachment headers don't count)
+            if mailHeaders["attachment-type"] then
+                headerCount = headerCount - 1
+            end
+            if mailHeaders["attachment-disp"] then
+                headerCount = headerCount - 1
+            end
+            if headerCount >= 5 then
+                thisIsMail = true
+            end
+            if thisIsMail then
+                nw.createMeta(self.keys.content, "mail")
+                self.thisIsMail = true
+            end
+        end
+        -- if first and last are nil, then we are at end of stream - in which case we no longer care about boundaries
+        if first and last then
+            if self.thisIsMail and mailHeaders and mailHeaders["boundary"] and (not self.mime.outer or not self.mime.inner) then
+                if nwpayload.uint16(nw.getPayload(last + 1, last + 2), 1) == 11565 then
+                    local payload = nw.getPayload(mailHeaders["boundary"][1]["first"], mailHeaders["boundary"][1]["last"])
+                    local position = 1
+                    repeat
+                        local loopControl = 0
+                        if payload:uint8(position) == 32 then
+                            position = position + 1
+                            loopControl = 1
+                        end
+                    until loopControl == 0
+                    local boundaryDefinition
+                    local quote = payload:uint8(position)
+                    if quote == 34 then
+                        position = position + 1
+                        local quoteEnd = payload:find('"', position, -1)
+                        if quoteEnd then
+                            boundaryDefinition = payload:tostring(position, quoteEnd - 1)
+                        end
+                    elseif quote == 39 then
+                        position = position + 1
+                        local quoteEnd = payload:find("'", position, -1)
+                        if quoteEnd then
+                            boundaryDefinition = payload:tostring(position, quoteEnd - 1)
+                        end
+                    else
+                        local endOfLine = payload:find("\010", position, -1)
+                        if endOfLine then
+                            endOfLine = endOfLine - 1
+                            if payload:uint8(endOfLine) == 13 then
+                                endOfLine = endOfLine - 1
+                            end
+                            boundaryDefinition = payload:tostring(position, endOfLine)
+                        end
+                    end
+                    if boundaryDefinition then
+                        if not self.mime.outer then
+                            self.mime.outer = boundaryDefinition
+                        else
+                            self.mime.inner = boundaryDefinition
+                        end
+                    else
+                        return
+                    end
+                end
+            end
+            if self.mime.outer and not self.mime.outerMatched then
+                local payload = nw.getPayload(last + 1, last + 2 + string.len(self.mime.outer))
+                if payload:uint16(1) == 11565 then
+                    payload = payload:sub(3, -1)
+                    if payload:equal(self.mime.outer) then
+                        self.mime.outerMatched = true
+                    end
+                end
+                if not self.mime.outerMatched then
+                    return
+                end
+            elseif self.mime.inner and not self.mime.innerMatched then
+                local payload = nw.getPayload(last + 1, last + 2 + string.len(self.mime.inner))
+                if payload:uint16(1) == 11565 then
+                    payload = payload:sub(3, -1)
+                    if payload:equal(self.mime.inner) then
+                        self.mime.innerMatched = true
+                    end
+                end
+                if not self.mime.innerMatched then
+                    return
+                end
+            elseif self.mime.inner and self.mime.innerMatched then
+                local payload = nw.getPayload(last + 1, last + 4 + string.len(self.mime.inner))
+                if payload:uint16(1) == 11565 and payload:uint16(-2) == 11565 then
+                    payload = payload:sub(3, -3)
+                    if payload:equal(self.mime.inner) then
+                        self.mime.innerMatched = false
+                        self.mime.inner = false
+                    end
+                end
+                if self.mime.innerMatched then
+                    return
+                end
+            elseif self.mime.outer and self.mime.outerMatched then
+                local payload = nw.getPayload(last + 1, last + 4 + string.len(self.mime.outer))
+                if payload:uint16(1) == 11565 and payload:uint16(-2) == 11565 then
+                    payload = payload:sub(3, -3)
+                    if payload:equal(self.mime.outer) then
+                        self.mime.outerMatched = false
+                        self.mime.outer = false
+                    end
+                end
+                if self.mime.outerMatched then
+                    return
+                end
+            end
+        end
+        if mailHeaders then
+            if thisIsMail then          -- local
+                self:registerHeaders(mailHeaders)
+                self.mailHeaders = nil
+            elseif self.thisIsMail then -- global
+                self:registerAttach(mailHeaders)
+                self.mailHeaders = nil
+            end
+        end
+    end, first, last)
+    if error and debugParser then
+        nw.logFailure(error)
+    end
+end
+
+mailParser:setCallbacks({
+    [nwevents.OnStreamBegin] = mailParser.reset,
+    ["\013\010\013\010"] = mailParser.endOfHeaders,
+    [nwevents.OnStreamEnd] = mailParser.endOfHeaders,
+    -- mail header tokens
+    ["^DATE:"] = mailParser.date,
+    ["^Date:"] = mailParser.date,
+    ["^date:"] = mailParser.date,
+    ["^FROM:"] = mailParser.originator,
+    ["^From:"] = mailParser.originator,
+    ["^from:"] = mailParser.originator,
+    ["^SENDER:"] = mailParser.originator,
+    ["^Sender:"] = mailParser.originator,
+    ["^sender:"] = mailParser.originator,
+    ["^REPLY-TO:"] = mailParser.originator,
+    ["^Reply-To:"] = mailParser.originator,
+    ["^Reply-to:"] = mailParser.originator,
+    ["^reply-to:"] = mailParser.originator,
+    ["^RETURN-PATH:"] = mailParser.originator,
+    ["^Return-Path:"] = mailParser.originator,
+    ["^Return-path:"] = mailParser.originator,
+    ["^return-path:"] = mailParser.originator,
+    ["^IN-REPLY-TO:"] = mailParser.originator,
+    ["^In-Reply-To:"] = mailParser.originator,
+    ["^In-reply-to:"] = mailParser.originator,
+    ["^in-reply-to:"] = mailParser.originator,
+    ["^TO:"] = mailParser.recipientTo,
+    ["^To:"] = mailParser.recipientTo,
+    ["^to:"] = mailParser.recipientTo,
+    ["^ENVELOPE-TO:"] = mailParser.recipientTo,
+    ["^Envelope-To:"] = mailParser.recipientTo,
+    ["^Envelope-to:"] = mailParser.recipientTo,
+    ["^envelope-to:"] = mailParser.recipientTo,
+    ["^CC:"] = mailParser.recipientCC,
+    ["^Cc:"] = mailParser.recipientCC,
+    ["^cc:"] = mailParser.recipientCC,
+    ["^BCC:"] = mailParser.recipientCC,
+    ["^Bcc:"] = mailParser.recipientCC,
+    ["^bcc:"] = mailParser.recipientCC,
+    ["^SUBJECT:"] = mailParser.subject,
+    ["^Subject:"] = mailParser.subject,
+    ["^subject:"] = mailParser.subject,
+    ["^X-ORIGINATING-IP:"] = mailParser.origIP,
+    ["^X-Originating-IP:"] = mailParser.origIP,
+    ["^X-originating-IP:"] = mailParser.origIP,
+    ["^x-originating-ip:"] = mailParser.origIP,
+    ["^X-MAILER:"] = mailParser.mailer,
+    ["^X-Mailer:"] = mailParser.mailer,
+    ["^X-mailer:"] = mailParser.mailer,
+    ["^x-mailer:"] = mailParser.mailer,
+    ["^RECEIVED:"] = mailParser.received,
+    ["^Received:"] = mailParser.received,
+    ["^received:"] = mailParser.received,
+    ["^MESSAGE-ID:"] = mailParser.otherHeader,
+    ["^Message-ID:"] = mailParser.otherHeader,
+    ["^Message-Id:"] = mailParser.otherHeader,
+    ["^message-id:"] = mailParser.otherHeader,
+    ["^REFERENCES:"] = mailParser.otherHeader,
+    ["^References:"] = mailParser.otherHeader,
+    ["^references:"] = mailParser.otherHeader,
+    ["MESSAGE-ID:"] = mailParser.otherHeader,
+    ["Message-ID:"] = mailParser.otherHeader,
+    ["Message-id:"] = mailParser.otherHeader,
+    ["message-id:"] = mailParser.otherHeader,
+    ["^COMMENTS:"] = mailParser.otherHeader,
+    ["^Comments:"] = mailParser.otherHeader,
+    ["^comments:"] = mailParser.otherHeader,
+    ["^KEYWORDS:"] = mailParser.otherHeader,
+    ["^Keywords:"] = mailParser.otherHeader,
+    ["^keywords:"] = mailParser.otherHeader,
+    ["^MIME-VERSION:"] = mailParser.otherHeader,
+    ["^MIME-version:"] = mailParser.otherHeader,
+    ["^Mime-Version:"] = mailParser.otherHeader,
+    ["^Mime-version:"] = mailParser.otherHeader,
+    ["^mime-version:"] = mailParser.otherHeader,
+    ["^PRECEDENCE:"] = mailParser.otherHeader,
+    ["^Precedence:"] = mailParser.otherHeader,
+    ["^precedence:"] = mailParser.otherHeader,
+    ["^DKIM-Signature:"] = mailParser.otherHeader,
+    ["^DomainKey-Signature:"] = mailParser.otherHeader,
+    ["^List-Help:"] = mailParser.otherHeader,
+    ["^List-Unsubscribe:"] = mailParser.otherHeader,
+    ["^List-Subscribe:"] = mailParser.otherHeader,
+    ["^List-Owner:"] = mailParser.otherHeader,
+    ["^List-Archive:"] = mailParser.otherHeader,
+    ["^X-Original-Authentication-Results:"] = mailParser.otherHeader,
+    ["^Authentication-Results:"] = mailParser.otherHeader,
+    ["^X-Cloudmark-"] = mailParser.otherHeader,
+    ["^CONTENT-TRANSFER-ENCODING:"] = mailParser.otherHeader,
+    ["^Content-Transfer-Encoding:"] = mailParser.otherHeader,
+    ["^Content-transfer-encoding:"] = mailParser.otherHeader,
+    ["^content-transfer-encoding:"] = mailParser.otherHeader,
+    -- attachment tokens
+    ["^CONTENT-TYPE:"] = mailParser.contentType,
+    ["^Content-Type:"] = mailParser.contentType,
+    ["^Content-type:"] = mailParser.contentType,
+    ["^content-type:"] = mailParser.contentType,
+    ["^CONTENT-DISPOSITION:"] = mailParser.contentDisposition,
+    ["^Content-Disposition:"] = mailParser.contentDisposition,
+    ["^Content-disposition:"] = mailParser.contentDisposition,
+    ["^content-disposition:"] = mailParser.contentDisposition,
+    ["NAME="] = mailParser.filename,
+    ["Name="] = mailParser.filename,
+    ["name="] = mailParser.filename,
+    -- rfc2231 formatted attachment tokens
+    ["^ URL*"] = mailParser.encFilename,
+    ["^ Url*"] = mailParser.encFilename,
+    ["^ url*"] = mailParser.encFilename,
+    ["^ TITLE*"] = mailParser.encFilename,
+    ["^ Title*"] = mailParser.encFilename,
+    ["^ title*"] = mailParser.encFilename,
+    ["^ NAME*"] = mailParser.encFilename,
+    ["^ Name*"] = mailParser.encFilename,
+    ["^ name*"] = mailParser.encFilename,
+    ["^ FILENAME*"] = mailParser.encFilename,
+    ["^ FileName*"] = mailParser.encFilename,
+    ["^ Filename*"] = mailParser.encFilename,
+    ["^ filename*"] = mailParser.encFilename,
+    -- multipart mime tokens
+    ["BOUNDARY="] = mailParser.boundary,
+    ["Boundary="] = mailParser.boundary,
+    ["boundary="] = mailParser.boundary,
+})
+
+return parserName, parserVersion, parserDetails, conflicts, dependencies, keyUsage, alertIDs, liveTags
