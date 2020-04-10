@@ -29,15 +29,11 @@ This meta key *could* be changed to look for a different meta key or other meta 
 
 When the defined meta key (i.e. `device.type`) is present, the parser will take its value and compare it to the list of values defined in `fine_parse_logs_options.lua`.  If there is a match, it will execute the defined lua pattern against the entire raw log.  If the pattern matches the log, it will extract the value and assign it to the defined meta key.
 
----
-
 ## Deployment
 
 There are several ways to deploy custom Lua parsers.  The easiest way currently is to use the [Resource Package Deployment Wizard] found within the Live UI<sup>[1](#livenavigation)</sup>.  The ZIP files found below in the [versions](#versions) table are packaged so that they can be deployed using this method.
 
 > IMPORTANT: When first installing the parser, you will need both the `fine_parse_logs.lua` file and the `fine_parse_logs_options.lua` file.  However, DO NOT re-deploy the options file after you have configured it or else your configurations will be overwritten with the defaults.  If you need to upgrade the options file, make sure to backup your settings first!
-
----
 
 ## Configuring the Options File
 
@@ -88,8 +84,6 @@ If your pattern exists multiple times within the raw log, then this parser will 
 
 If the value you are extracting contains a delimited list of values you can use the "isarray" and "arraydelim" properties to cause the parser to extract each value and register it to the defined meta key separately.
 
----
-
 ## Troubleshooting
 
 You can test the configuration of your options file by watching the logs for any errors.  Try running the following command from an SSH session in your Log Decoder while you load the parser or when the relevant logs are consumed:
@@ -100,13 +94,9 @@ tail -f /var/log/messages | grep -i lua
 
 If your options file has errors, the log will specify where the error was found in your configuration.
 
----
-
 ## A Word of Caution
 
 Using this parser can NEGATIVELY IMPACT PERFORMANCE, although the performance impact will depend on the volume of logs which match your options parameters.  In most cases, the impact will be negligible-to-minor, but please do some testing before leaving this parser running in production.
-
----
 
 ## Versions
 
@@ -114,9 +104,7 @@ Using this parser can NEGATIVELY IMPACT PERFORMANCE, although the performance im
 
 | Release | Date       | Changes         | Download                           |
 | ------- | ---------- | --------------- | ---------------------------------- |
-| v1.0    | 9-Mar-2020 | initial version | [main parser]() - [options file]() |
-
----
+| v1.0    | 9-Mar-2020 | initial version | [main parser](https://github.com/mitchellhanks/nw-fine-parse-logs/releases/download/v1.0/fine_parse_logs.zip) - [options file](https://github.com/mitchellhanks/nw-fine-parse-logs/releases/download/v1.0/fine_parse_logs_options.zip) |
 
 ## More Info
 
@@ -129,13 +117,9 @@ Here are some good references for understanding Lua patterns:
 * [Official lua reference]
 * [Lua Patterns Tutorial]
 
----
-
 ## License
 
 This project is licensed under the Apache 2.0 license - see the [LICENSE.md] file for details
-
----
 
 ## Footnotes
 
