@@ -117,6 +117,13 @@ Here are some good references for understanding Lua patterns:
 * [Official lua reference]
 * [Lua Patterns Tutorial]
 
+## To Do
+
+1. Make callback keys dynamically defined based on options file.  (Requires change to options file format)
+2. Provide way to run search regardless of the callback key value (just it's presence)
+3. Ensure that all matches of the pattern can be extracted to the same meta
+4. Document how transient meta can be used to trigger the parser
+
 ## License
 
 This project is licensed under the Apache 2.0 license - see the [LICENSE.md] file for details

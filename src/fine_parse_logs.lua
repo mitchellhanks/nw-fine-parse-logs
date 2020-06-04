@@ -52,13 +52,17 @@ local indexKeys = {}  -- Will use this table to contain meta key names we will r
 
     function fineparse:extractInfo(idx, metaval)
         -- Loop through conditions table for this callback and search on each condition
+        
+        -- NOTE: This for loop will only execute if the value from the callback matches one of the 
+        -- values included in the options file entries (the "metaval").  Otherwise it will exit before 
+        -- extracting any payload or doing anything else at this point.
         for index,condition in ipairs(conditions[metaval]) do
             -- Extract the parameters from the conditions table
             local pattern = condition[1]
             local metakey = condition[2]
             local isarray = condition[3]
             local arraydelim = condition[4]
-            
+
             local payload = nw.getPayload(1,-1)
             local rawlog = payload:tostring(1,-1)
 
@@ -74,7 +78,7 @@ local indexKeys = {}  -- Will use this table to contain meta key names we will r
                         else
                             nw.createMeta(self.keys[metakey], tmatch)
                         end
-                    end            
+                    end
                 end
             end
         end
@@ -130,7 +134,7 @@ local indexKeys = {}  -- Will use this table to contain meta key names we will r
 
         if badparam then
             nw.logFailure(parserName .. ": ERROR: Missing or invalid parameter [ " .. badparam  .. " ] in options file entry " .. index .. ".  Parser cannot load.")
-            return
+            return --This will exit the parser without loading or executing its callbacks, effectively disabling it.
         end
 
         -- Add search condition/pattern for the current callback value
