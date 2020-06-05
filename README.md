@@ -24,7 +24,7 @@ When the defined meta key is present, the parser will take its value and compare
 
 ## Deployment
 
-There are several ways to deploy custom Lua parsers.  The easiest way currently is to use the [Resource Package Deployment Wizard] found within the Live UI<sup>[1](#livenavigation)</sup>.  The ZIP files found below in the [versions](#versions) table are packaged so that they can be deployed using this method.
+There are several ways to deploy custom Lua parsers.  The easiest way currently is to use the [Resource Package Deployment Wizard] found within the Live UI<sup>[1](#livenavigation)</sup>.  The ZIP files found under [releases] are packaged so that they can be deployed using this method.
 
 > IMPORTANT: When first installing the parser, you will need **BOTH** the `fine_parse_logs.lua` file **AND** the `fine_parse_logs_options.lua` file.  However, DO NOT re-deploy the options file after you have configured it or else your configurations will be overwritten with the defaults.  If you need to upgrade the options file, make sure to backup your settings first!
 
