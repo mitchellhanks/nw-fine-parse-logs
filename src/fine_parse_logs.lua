@@ -1,5 +1,5 @@
 local parserName = "fine_parse_logs"
-local parserVersion = "1.0"
+local parserVersion = "1.1"
 local fineparse = nw.createParser(parserName, "Fine parse logs using Lua pattern matching.")
 nw.logDebug(parserName .. " " .. parserVersion)
 
