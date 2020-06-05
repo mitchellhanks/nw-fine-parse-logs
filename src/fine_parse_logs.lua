@@ -13,6 +13,10 @@ nw.logDebug(parserName .. " " .. parserVersion)
         
         Current version can be found above in the "parserVersion" parameter.
         
+        REQUIRES:
+
+            fine_parse_logs_options.lua     v1.1
+
         CAUTION: See project README regarding potential negative impact to performance in using this parser.
 
         CAUTION: This parser WILL NOT LOAD without the fine_parse_logs_options.lua file deployed and properly configured.  
