@@ -24,26 +24,26 @@ nw.logDebug(parserName .. " " .. parserVersion)
         --]]
         
         
-        -- FUNCTIONS --
-        function fineparse:sessionBegin()
-            -- Reset global values
-            self.sessionVars = {}
-        end
-        
-        function arraysplit (inputstr, sep)
-            if sep == nil then
-                sep = "%s"
-            end        
-            local t={}
-            for str in string.gmatch(inputstr, "([^"..sep.."]+)") do
-                table.insert(t, str)
-            end        
-            return t
-        end    
-        
-        function validate(val,datatype,required)
-            if required ~=nil and required ~= 0 and required ~= "0" and required ~= "no" and required ~= "No" and required ~= "NO" and required ~= "" and (val == nil or val == "") then
-                return false
+-- FUNCTIONS --
+function fineparse:sessionBegin()
+    -- Reset global values
+    self.sessionVars = {}
+end
+
+function arraysplit (inputstr, sep)
+    if sep == nil then
+        sep = "%s"
+    end        
+    local t={}
+    for str in string.gmatch(inputstr, "([^"..sep.."]+)") do
+        table.insert(t, str)
+    end        
+    return t
+end    
+
+function validate(val,datatype,required)
+    if required ~=nil and required ~= 0 and required ~= "0" and required ~= "no" and required ~= "No" and required ~= "NO" and required ~= "" and (val == nil or val == "") then
+        return false
     elseif val == nil or val == "" then
         return true
     elseif type(val) == datatype then
