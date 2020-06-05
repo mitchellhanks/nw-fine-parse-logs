@@ -55,6 +55,11 @@ For each pattern you wish to use, create a JSON-formatted entry in `fine_parse_l
 | pattern     | yes                   | Lua pattern to use for searching the raw log.  Will extract the first capture group.                                                                                       |
 | isarray     | no                    | (0=false \[Default\]) (1=true) If set to 1 then the extracted value will be split using the value of `delimiter` and each value registered separately to the same meta key |
 | arraydelim  | only if `isarray` = 1 | Delimiter used to split the value array.                                                                                                                                   |
+Each pattern must have **exactly** one "capture group", defined by the pattern found within the parentheses `(xyz)`.
+
+If your pattern exists multiple times within the raw log, then this parser will extract each match and register it to the same defined meta key.  If this is the case, it's a good idea (not required) to use a meta key that is defined as a string array type under your ESA Rules settings.
+
+If the value you are extracting contains a delimited list of values you can use the "isarray" and "arraydelim" properties to cause the parser to extract each value and register it to the defined meta key separately.
 
 ### Example
 
@@ -79,12 +84,6 @@ Lua patterns may also be used in the `callbackval`.  Or if you don't care what v
 {callbackkey="event.name", callbackval=".*", metakey="agent.id", pattern="\"agent\":\"(.-)\""},
 {callbackkey="event.name", callbackval=".*", metakey="agent.id", pattern="agentIds\\=%[(.-)]", isarray=1, arraydelim=", "},
 ```
-
-Each pattern must have **exactly** one "capture group", defined by the pattern found within the parentheses `(xyz)`.
-
-If your pattern exists multiple times within the raw log, then this parser will extract each match and register it to the same defined meta key.  If this is the case, it's a good idea (not required) to use a meta key that is defined as a string array type under your ESA Rules settings.
-
-If the value you are extracting contains a delimited list of values you can use the "isarray" and "arraydelim" properties to cause the parser to extract each value and register it to the defined meta key separately.
 
 ## Troubleshooting
 
