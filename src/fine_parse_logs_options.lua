@@ -54,7 +54,8 @@ module('fine_parse_logs_options')
 
 function get_search_conditions()
 	return {
-		{callbackval="rsa_netwitness_audit", metakey="agent.id", pattern="\"agent\":\"(.-)\""},
-		{callbackval="rsa_netwitness_audit", metakey="agent.id", pattern="agentIds\\=%[(.-)]", isarray=1, arraydelim=", "},
+		{callbackkey="device.type", callbackval="rsa_netwitness_audit", metakey="agent.id", pattern="\"agent\":\"(.-)\""},
+		{callbackkey="device.type", callbackval="rsa_netwitness_audit", metakey="agent.id", pattern="agentIds\\=%[(.-)]", isarray=1, arraydelim=", "},
+		{callbackkey="event.name", callbackval="rsa_netwitness_audit", metakey="agent.id", pattern="sandwich\\=%[(.-)]"},
 	}
 end
