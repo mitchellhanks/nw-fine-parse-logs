@@ -4,7 +4,7 @@ A Lua parser for [RSA NetWitness Platform] which will extract meta from logs usi
 
 ## Downloads
 
-See **[releases]** for downloads and version history.
+See **[releases]** for downloads and version history.  See [Deployment](#deployment) for instructions.
 
 > NOTE: Unless otherwise noted in the release notes, you don't need to deploy the options file a second time.  If you do need to re-deploy the options file, please be sure to back up your configurations.
 
