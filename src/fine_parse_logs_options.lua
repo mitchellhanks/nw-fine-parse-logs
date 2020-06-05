@@ -4,10 +4,13 @@ module('fine_parse_logs_options')
 
 		Create a separate entry for each callback meta value/pattern combination.
 
-		HISTORY
+		VERSION HISTORY
 
-			1.0 - Initial version
-			1.1 - Required for script v1.1 - Added callbackkey as a required parameter; added Lua pattern matching for meta callback value
+			1.1 (current)	- NOTE:Required for script v1.1
+							- Added callbackkey as a required parameter
+							- dded Lua pattern matching for meta callback value
+
+			1.0				- Initial version
 
 		NOTES
 			
@@ -55,14 +58,18 @@ module('fine_parse_logs_options')
 				arraydelim=", "
 			},
 		
-		TIP: Use Lua patterns for "fuzzy" matching the meta callback value.  e.g. To scan the raw log any time the 
-		meta key "event.name" is present (regardless of value) and register the extracted value to the "context" meta key
-			{
-				callbackkey="event.name",
-				callbackval=".*",
-				metakey="context",
-				pattern="query\=\"(.-)\""
-			},
+		TIPS
+			
+			Use Lua patterns for "fuzzy" matching the meta callback value.  e.g. To scan the raw log any time the 
+			meta key "event.name" is present (regardless of value) and register the extracted value to the "context" meta key
+			For example: 
+			
+				{
+					callbackkey="event.name",
+					callbackval=".*",
+					metakey="context",
+					pattern="query\=\"(.-)\""
+				},
 
 	--]=]
 
